@@ -1,8 +1,27 @@
 # AEGIS AI Gateway - Dev Deployment Plan
 
-**Status**: Ready for first deployment  
+**Status**: Ready for first deployment ✅  
 **Target Environment**: Development/Staging  
-**Date**: 2025-01-22
+**Date**: 2025-01-22  
+**Last Updated**: 2026-03-26 (Technical audit corrections applied)
+
+---
+
+## 📝 Changelog (2026-03-26)
+
+**Technical Audit by Artemis**: All SQL queries, commands, and examples verified against actual codebase.
+
+**Corrections Applied**:
+- Fixed SQL column names: `model_used` → `model_served`, `cost_usd` → `estimated_cost_usd`
+- Fixed audit_events query columns
+- Corrected migration file names in expected outputs
+- Fixed model names: replaced `aegis-smart` with `aegis-reasoning`, `aegis-secure` with `aegis-internal`
+- Updated keygen expected output format
+- Added missing `usage_daily` table to verification
+- Removed references to non-existent `aegis-gateway` Docker container
+- Corrected API key format examples with environment prefix
+- Fixed cost comparison ordering
+- Updated all table/column references to match actual schema
 
 ---
 
@@ -18,18 +37,35 @@ We'll deploy aegis-ai-gateway to a dev environment with:
 
 ---
 
+## 📊 Database Schema Quick Reference
+
+### Core Tables
+- **api_keys**: Authentication tokens with classification and rate limits
+- **audit_logs**: Detailed request/response logs with token usage and cost
+- **audit_events**: Security events (blocks, violations, auth failures)
+- **usage_records**: Per-request usage tracking (detailed)
+- **usage_daily**: Aggregated daily usage by org/team/model
+
+### Key Column Names (for queries)
+- Models: `model_requested`, `model_served` (NOT `model_used`)
+- Cost: `estimated_cost_usd` in usage_records, `estimated_cost_cents` in audit_logs (NOT `cost_usd`)
+- Keys: `key_hash`, `key_prefix` (NOT `api_key_hash`)
+- IDs: `organization_id`, `team_id`, `user_id` (NOT `organization`, `team`, `user`)
+
+---
+
 ## 📋 Prerequisites Checklist
 
 ### Infrastructure
 - [ ] Server/VM with Docker installed
 - [ ] Docker Compose v2+ available
 - [ ] Go 1.25+ installed (or mise)
-- [ ] Ports available: 8080 (gateway), 9090 (metrics), 5432 (postgres), 6379 (redis)
+- [ ] Ports available: 8080 (gateway), 9090 (metrics), 5432 (postgres), 6379 (redis), 50051 (filter-nlp)
 - [ ] SSL certificate (optional for dev, required for production)
 
 ### Credentials
 - [ ] OpenAI API key (for gpt-4o, gpt-4o-mini testing)
-- [ ] Anthropic API key (for claude-3.5-sonnet testing)
+- [ ] Anthropic API key (for claude models testing)
 - [ ] Azure OpenAI credentials (optional)
 - [ ] Database credentials decided
 
@@ -37,6 +73,9 @@ We'll deploy aegis-ai-gateway to a dev environment with:
 - [ ] SSH access to deployment server
 - [ ] GitHub access to clone repo
 - [ ] Ability to set environment variables
+
+### Optional
+- [ ] Filter-service repository cloned at `../filter-service` (for NLP filtering, can skip for basic testing)
 
 ---
 
@@ -121,6 +160,8 @@ For dev, these are fine. For production, use strong credentials.
 
 ### Step 3: Start Infrastructure (10 min)
 
+**Note**: If you don't have the filter-service repository, comment out the `aegis-filter-nlp` service in `deploy/docker-compose.yaml` temporarily. The gateway will start without it (content filtering will be disabled).
+
 **Start PostgreSQL, Redis, and NLP filter service:**
 
 ```bash
@@ -140,7 +181,7 @@ mise run services:logs
 ```
 ✔ Container aegis-postgres     Healthy
 ✔ Container aegis-redis         Healthy
-✔ Container aegis-filter-nlp    Healthy
+✔ Container aegis-filter-nlp    Healthy  (or omit if not using filter-service)
 ```
 
 **Test database connection:**
@@ -169,9 +210,9 @@ mise run db:migrate
 **Expected output:**
 ```
 Running migrations up...
-Applied migration: 001_initial_schema.up.sql
-Applied migration: 002_add_api_keys.up.sql
-Applied migration: 003_add_audit_logs.up.sql
+Applied migration: 001_create_api_keys.up.sql
+Applied migration: 002_create_audit_logs.up.sql
+Applied migration: 003_create_usage_records.up.sql
 Applied migration: 004_create_usage_records_detailed.up.sql
 Applied migration: 005_create_audit_events.up.sql
 ✓ All migrations applied
@@ -188,6 +229,7 @@ docker exec -it aegis-postgres psql -U aegis -d aegis -c "\dt"
 - audit_logs
 - audit_events
 - usage_records
+- usage_daily
 - schema_migrations
 
 ---
@@ -227,17 +269,20 @@ mise run keygen
 
 **Expected output:**
 ```
-Generated API key: ak_abcd1234efgh5678ijkl9012mnop3456qrst7890
-Organization: dev-org
-Team: dev-team
-Name: dev-key
-Classification: INTERNAL
-Expires: 2026-01-22
+=== AEGIS API Key Generated ===
 
-⚠️  Save this key — it's shown only once!
+  Key ID:         550e8400-e29b-41d4-a716-446655440000
+  Key Prefix:     ak_prod
+  Organization:   dev-org
+  Team:           dev-team
+  Classification: INTERNAL
+  Expires:        2026-01-22T10:00:00Z
+
+  API Key (save this — it will NOT be shown again):
+  ak_prod_abcd1234efgh5678ijkl9012mnop3456qrst7890
 ```
 
-**Save this key** — you'll need it for testing.
+**⚠️ Save this key** — you'll need it for testing.
 
 **Generate keys for different scenarios:**
 
@@ -257,6 +302,14 @@ go run ./cmd/keygen \
   -name budget-test-key \
   -classification INTERNAL \
   -expires 30d
+
+# Low classification key (for testing classification gating)
+go run ./cmd/keygen \
+  -org public-team \
+  -team external \
+  -name public-key \
+  -classification PUBLIC \
+  -expires 7d
 ```
 
 ---
@@ -316,12 +369,20 @@ curl http://localhost:9090/metrics | grep aegis
 
 Run these to validate the deployment. Each scenario tests a critical feature.
 
+### Available Models
+
+The deployment includes these model aliases (see `configs/models.yaml`):
+- **aegis-gpt4**: Latest GPT-4 (CONFIDENTIAL classification)
+- **aegis-fast**: Fast/cheap model using Claude Haiku or GPT-4o-mini (INTERNAL classification)
+- **aegis-reasoning**: Advanced reasoning with Claude Opus (CONFIDENTIAL classification)
+- **aegis-internal**: Air-gapped internal model (RESTRICTED classification)
+
 ### Scenario 1: Basic Chat Completion (OpenAI)
 
 **Test**: Simple request to OpenAI model through the gateway
 
 ```bash
-API_KEY="ak_your_key_here"  # Replace with your generated key
+API_KEY="ak_prod_your_key_here"  # Replace with your generated key
 
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
@@ -340,7 +401,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   "id": "chatcmpl-...",
   "object": "chat.completion",
   "created": 1705924800,
-  "model": "gpt-4o-mini",
+  "model": "claude-haiku-4-5-20251001",
   "choices": [
     {
       "index": 0,
@@ -356,7 +417,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "completion_tokens": 7,
     "total_tokens": 19
   },
-  "estimated_cost_usd": 0.0000285
+  "estimated_cost_usd": 0.0000096
 }
 ```
 
@@ -370,7 +431,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ```bash
 docker exec -it aegis-postgres psql -U aegis -d aegis -c \
-  "SELECT request_id, model_used, prompt_tokens, completion_tokens, cost_usd 
+  "SELECT request_id, model_served, prompt_tokens, completion_tokens, estimated_cost_usd 
    FROM usage_records 
    ORDER BY created_at DESC 
    LIMIT 1;"
@@ -383,16 +444,16 @@ docker exec -it aegis-postgres psql -U aegis -d aegis -c \
 
 ---
 
-### Scenario 2: Streaming Response (Anthropic)
+### Scenario 2: Streaming Response (Claude)
 
-**Test**: Streaming chat completion with Claude
+**Test**: Streaming chat completion with Claude Opus
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "aegis-smart",
+    "model": "aegis-reasoning",
     "messages": [
       {"role": "user", "content": "Count from 1 to 5, one number per line"}
     ],
@@ -402,9 +463,9 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 **Expected output** (SSE chunks):
 ```
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1705924800,"model":"claude-3.5-sonnet","choices":[{"index":0,"delta":{"role":"assistant","content":"1"},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1705924800,"model":"claude-opus-4-5-20250929","choices":[{"index":0,"delta":{"role":"assistant","content":"1"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1705924800,"model":"claude-3.5-sonnet","choices":[{"index":0,"delta":{"content":"\n2"},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1705924800,"model":"claude-opus-4-5-20250929","choices":[{"index":0,"delta":{"content":"\n2"},"finish_reason":null}]}
 
 ...
 
@@ -467,7 +528,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ```bash
 docker exec -it aegis-postgres psql -U aegis -d aegis -c \
-  "SELECT event_type, action, result, details 
+  "SELECT event_type, error_message, metadata 
    FROM audit_events 
    WHERE event_type = 'filter_block' 
    ORDER BY timestamp DESC 
@@ -477,7 +538,7 @@ docker exec -it aegis-postgres psql -U aegis -d aegis -c \
 **Verify**:
 - [ ] Audit event logged
 - [ ] Event type is `filter_block`
-- [ ] Details include reason (secrets detected)
+- [ ] Error message includes reason (secrets detected)
 
 ---
 
@@ -549,27 +610,16 @@ curl -s http://localhost:9090/metrics | grep aegis_ratelimit
 
 **Test**: Request requiring high classification with low-class key
 
-Generate a low-classification key if you haven't:
+Use the PUBLIC classification key generated earlier:
 
 ```bash
-go run ./cmd/keygen \
-  -org public-team \
-  -team external \
-  -name public-key \
-  -classification PUBLIC \
-  -expires 7d
-```
-
-**Attempt to use a CONFIDENTIAL model:**
-
-```bash
-LOW_CLASS_KEY="ak_..."  # Your PUBLIC classification key
+LOW_CLASS_KEY="ak_prod_..."  # Your PUBLIC classification key from Step 6
 
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $LOW_CLASS_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "aegis-secure",
+    "model": "aegis-internal",
     "messages": [
       {"role": "user", "content": "Test"}
     ]
@@ -601,13 +651,14 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 **Simulate OpenAI failure** by using an invalid API key temporarily:
 
 ```bash
-# Stop the gateway
+# Stop the gateway (Ctrl+C)
 # Edit .env: set OPENAI_API_KEY=sk-invalid
+nano .env
 # Restart gateway
 mise run run
 ```
 
-**Send request to aegis-fast (primary: OpenAI, fallback: Anthropic):**
+**Send request to aegis-fast (primary: Haiku, fallback: OpenAI):**
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat/completions \
@@ -623,13 +674,13 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 **Expected response:**
 - Response succeeds (200 OK)
-- `model` field shows fallback provider was used (e.g., "claude-3.5-sonnet")
+- `model` field shows fallback provider was used (e.g., "gpt-4o-mini")
 - Gateway logs show fallback triggered
 
 **Verify gateway logs:**
 ```
 WARN  Primary provider failed, attempting fallback
-INFO  Fallback to anthropic successful
+INFO  Fallback to openai successful
 ```
 
 **Check metrics:**
@@ -642,7 +693,7 @@ curl -s http://localhost:9090/metrics | grep aegis_provider_fallback
 - [ ] `aegis_provider_fallback_total` incremented
 - [ ] Response successful despite primary failure
 
-**Restore OpenAI key** and restart gateway.
+**Restore API keys** in `.env` and restart gateway.
 
 ---
 
@@ -653,7 +704,7 @@ curl -s http://localhost:9090/metrics | grep aegis_provider_fallback
 **Send 3 requests** to different models:
 
 ```bash
-# Request 1: gpt-4o-mini (cheap)
+# Request 1: gpt-4o-mini (cheapest)
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
@@ -671,19 +722,19 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     "messages": [{"role": "user", "content": "Hi"}]
   }' | jq '.estimated_cost_usd'
 
-# Request 3: claude-3.5-sonnet (mid-range)
+# Request 3: claude-opus (most expensive)
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "aegis-smart",
+    "model": "aegis-reasoning",
     "messages": [{"role": "user", "content": "Hi"}]
   }' | jq '.estimated_cost_usd'
 ```
 
 **Verify**:
-- [ ] gpt-4o cost > claude cost > gpt-4o-mini cost
-- [ ] Costs are reasonable (check against provider pricing)
+- [ ] claude-opus cost > gpt-4o cost > gpt-4o-mini cost
+- [ ] Costs are reasonable (check against provider pricing in configs/models.yaml)
 
 **Check cumulative cost:**
 
@@ -691,11 +742,11 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 docker exec -it aegis-postgres psql -U aegis -d aegis -c \
   "SELECT 
      COUNT(*) as total_requests,
-     SUM(cost_usd) as total_cost,
-     AVG(cost_usd) as avg_cost,
-     model_used
+     SUM(estimated_cost_usd) as total_cost,
+     AVG(estimated_cost_usd) as avg_cost,
+     model_served
    FROM usage_records
-   GROUP BY model_used
+   GROUP BY model_served
    ORDER BY total_cost DESC;"
 ```
 
@@ -726,18 +777,29 @@ curl -X GET http://localhost:8080/v1/models \
   "object": "list",
   "data": [
     {
+      "id": "aegis-gpt4",
+      "object": "model",
+      "created": 1705924800,
+      "owned_by": "aegis"
+    },
+    {
       "id": "aegis-fast",
       "object": "model",
       "created": 1705924800,
       "owned_by": "aegis"
     },
     {
-      "id": "aegis-smart",
+      "id": "aegis-reasoning",
       "object": "model",
       "created": 1705924800,
       "owned_by": "aegis"
     },
-    ...
+    {
+      "id": "aegis-internal",
+      "object": "model",
+      "created": 1705924800,
+      "owned_by": "aegis"
+    }
   ]
 }
 ```
@@ -901,21 +963,22 @@ ls -la configs/
 ```bash
 # Key exists in database?
 docker exec -it aegis-postgres psql -U aegis -d aegis -c \
-  "SELECT api_key_hash, organization, expires_at FROM api_keys;"
+  "SELECT key_hash, organization_id, expires_at FROM api_keys;"
 
 # Redis cache accessible?
 docker exec -it aegis-redis redis-cli KEYS "auth:*"
 
 # Using correct header format?
-# Correct:   Authorization: Bearer ak_...
-# Incorrect: Authorization: ak_...
-# Incorrect: X-API-Key: ak_...
+# Correct:   Authorization: Bearer ak_prod_...
+# Incorrect: Authorization: ak_prod_...
+# Incorrect: X-API-Key: ak_prod_...
 ```
 
 **Common fixes**:
 - Regenerate key: `mise run keygen`
-- Use full `Bearer ak_...` format in header
+- Use full `Bearer ak_prod_...` format in header
 - Check key hasn't expired
+- Verify key includes environment prefix (e.g., `ak_prod_`, not just `ak_`)
 
 ---
 
@@ -933,8 +996,8 @@ echo $ANTHROPIC_API_KEY
 curl -I https://api.openai.com/v1/models
 curl -I https://api.anthropic.com/v1/messages
 
-# Check gateway logs
-docker logs aegis-gateway
+# Check gateway logs (running in foreground, or check mise run output)
+# Gateway is NOT a Docker container - it's a binary process
 ```
 
 **Common fixes**:
@@ -966,9 +1029,9 @@ curl -w "\nTime: %{time_total}s\n" \
 ```
 
 **Common fixes**:
-- Increase DB pool size in config
+- Increase DB pool size in `configs/gateway.yaml`
 - Check Redis memory usage: `docker exec aegis-redis redis-cli INFO memory`
-- Use faster models (gpt-4o-mini vs gpt-4o)
+- Use faster models (aegis-fast vs aegis-reasoning)
 - Check network latency to providers
 
 ---
@@ -1042,8 +1105,9 @@ Deployment is successful when:
 **Good luck with the deployment!** 🚀
 
 If you encounter issues not covered here, check:
-- Gateway logs: `docker logs aegis-gateway`
+- Gateway process output (running in foreground via `mise run run`)
 - Service logs: `mise run services:logs`
+- Audit report: `DEV_DEPLOYMENT_PLAN_AUDIT_REPORT.md`
 - GitHub issues: https://github.com/kommunication/aegis-ai-gateway/issues
 
 **Questions?** Open an issue or contact the team.
