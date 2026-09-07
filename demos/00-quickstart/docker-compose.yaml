@@ -50,7 +50,17 @@ services:
     # Published image by default, so a first run needs no Go toolchain and no
     # compile. `./quickstart.sh --build` layers docker-compose.build.yaml over
     # this file to build from the working tree instead.
-    image: ${AEGIS_IMAGE:-ghcr.io/aegis-gateway/aegis-ai-gateway:v0.1.0}
+    #
+    # No leading v: the pipeline publishes docker/metadata-action's {{version}},
+    # so the git tag v0.1.1 is pushed as the image tag 0.1.1. Naming :v0.1.0
+    # here referenced a tag that does not exist, and quickstart.sh's fallback
+    # turned that failed pull into a source build rather than an error, so the
+    # documented default path was compiling the gateway instead of pulling it.
+    #
+    # 0.1.1 rather than 0.1.0: multi-arch builds landed after v0.1.0 was
+    # tagged, so 0.1.0 is amd64 only and Docker refuses it outright on Apple
+    # Silicon rather than emulating. 0.1.1 carries linux/arm64 too.
+    image: ${AEGIS_IMAGE:-ghcr.io/aegis-gateway/aegis-ai-gateway:0.1.1}
     container_name: aegis-demo-gateway
     depends_on:
       postgres:

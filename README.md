@@ -19,7 +19,7 @@ cd aegis-ai-gateway
 Or without cloning anything:
 
 ```bash
-curl -O https://aegisgateway.ai/demo/compose.yaml
+curl -fO https://aegisgateway.ai/demo/compose.yaml
 docker compose up
 ```
 

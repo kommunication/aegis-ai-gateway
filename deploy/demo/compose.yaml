@@ -1,7 +1,11 @@
 # AEGIS AI Gateway. A demo you can run without cloning anything.
 #
-#   curl -O https://aegisgateway.ai/demo/compose.yaml
+#   curl -fO https://aegisgateway.ai/demo/compose.yaml
 #   docker compose up
+#
+# The -f matters. Without it curl treats a 404 as a successful download and
+# writes the error body here, so a misdeployed file arrives as an empty
+# compose.yaml and the failure shows up as a compose parse error instead.
 #
 # Then, in another terminal:
 #
@@ -68,6 +72,8 @@ services:
     image: redis:7-alpine
     container_name: aegis-demo-redis
     command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -76,9 +82,20 @@ services:
       start_period: 5s
 
   gateway:
-    # Published multi-arch image. Nothing here is built, so no Go toolchain and
-    # no clone are needed. The image is built and pushed by the docker job in
-    # .github/workflows/ci.yml.
+    # linux/amd64 and linux/arm64, so this runs natively on Apple Silicon. The
+    # docker job in .github/workflows/ci.yml builds both and then re-pulls the
+    # tag it just pushed, anonymously, asserting each architecture is present
+    # before the build counts as green.
+    #
+    # No leading v: the pipeline publishes docker/metadata-action's
+    # {{version}}, so the git tag v0.1.1 is pushed as the image tag 0.1.1.
+    #
+    # 0.1.0 is deliberately not used here. It was tagged one day before
+    # multi-arch was added, so it and every other tag cut from it are amd64
+    # only, and `docker compose up` on Apple Silicon fails outright with "no
+    # matching manifest for linux/arm64/v8" rather than falling back to
+    # emulation. This file is the no-clone path, so it tracks the first release
+    # that carries both architectures.
     image: ghcr.io/aegis-gateway/aegis-ai-gateway:0.1.1
     container_name: aegis-demo-gateway
     depends_on:
@@ -142,3 +159,4 @@ services:
 
 volumes:
   pgdata:
+  redisdata:

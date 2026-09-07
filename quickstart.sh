@@ -285,7 +285,7 @@ else
     cat "$up_log"
   else
     echo
-    echo "Could not pull ${AEGIS_IMAGE:-ghcr.io/aegis-gateway/aegis-ai-gateway:v0.1.0}."
+    echo "Could not pull ${AEGIS_IMAGE:-ghcr.io/aegis-gateway/aegis-ai-gateway:0.1.1}."
     echo "Building from this working tree instead. Pass --build to skip the pull next time."
     echo
     compose_files+=(-f docker-compose.build.yaml)

@@ -9,10 +9,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-> Bookkeeping note, not part of this change: the entries below this heading that
-> predate the `v0.1.0` tag describe work that shipped in it, and belong under a
-> `## [0.1.0]` heading. Left alone here rather than restructured as a side effect
-> of an unrelated change.
+## [0.1.1] - 2026-09-07
+
+> Bookkeeping note: some entries below this heading predate the `v0.1.0` tag and
+> describe work that shipped in it, so they belong under `## [0.1.0]`. Left in
+> place rather than restructured as a side effect of cutting this release.
+
+> This is numbered as a patch. It carries feature work, including a retired
+> endpoint, which under strict SemVer would be a minor release. Recorded here so
+> the number is not read as a promise the contents do not keep.
 
 ### Added
 - **Tool calling works on Anthropic routes.** The Anthropic adapter translates the OpenAI tool surface in both directions: `tools[].function.parameters` becomes `input_schema`, `tool_choice: "required"` becomes `{"type":"any"}`, a named function becomes `{"type":"tool"}`, `parallel_tool_calls` becomes `disable_parallel_tool_use` *inside* `tool_choice`, a `role: "tool"` message becomes a `tool_result` block on a user turn, `strict` is carried through to the provider, which accepts it alongside `input_schema` and enforces the schema behind it, and `stop_reason: tool_use` becomes `finish_reason: tool_calls`. Every shipped alias lists an Anthropic provider first, so tool calling was previously unreachable in the configuration the project ships. (`internal/router/adapters/anthropic_tools.go`)
@@ -38,6 +43,10 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 - `TestSchemaLimitsMatchMigration` parses the migrations and fails if the column widths and the Go constants disagree, because that drift is silent in the direction that matters: Go clips to the larger number and PostgreSQL rejects the row.
 
 ### Fixed
+- **The published image is built for `linux/arm64` as well as `linux/amd64`.** `v0.1.0` was tagged one day before the docker job learned to build both, so `0.1.0`, `0.1` and `latest` all carry `linux/amd64` only. Docker does not quietly fall back to emulation for a platform that is absent from the manifest: it refuses the pull, so `docker compose up` on Apple Silicon failed on the first command of the no-clone path with `no matching manifest for linux/arm64/v8`. This is the first release whose image carries both architectures. The docker job now re-pulls the tag it just pushed, anonymously, and asserts each architecture is present and that the binary runs, so an image nobody can pull fails the build instead of shipping. (`.github/workflows/ci.yml`)
+- **The demo compose files named image tags that were never published.** `deploy/demo/compose.yaml` referenced `0.1.1` before any such release existed, and `demos/00-quickstart/docker-compose.yaml` defaulted to `v0.1.0`, which the pipeline never pushes because it publishes `{{version}}` without the leading `v`. Both now name `0.1.1`, the release this entry describes. The quickstart's pull failure was invisible because its fallback builds from source instead, so the documented default path was compiling the gateway rather than pulling it, and the time-to-first-response claim quietly stopped holding.
+- **The no-clone path is documented with `curl -fO`, not `curl -O`.** Without `-f`, curl treats a 404 as a successful download and writes the error body to `compose.yaml`. `https://aegisgateway.ai/demo/compose.yaml` served a zero-length 404, so the documented command produced an empty `compose.yaml` and reported success, and the failure surfaced as an unrelated compose parse error. The site now publishes the file, and `docs/QUICKSTART-COMMANDS.md`, `README.md` and the file's own header all use `-f`.
+- **Redis had nowhere to write its append-only file.** `deploy/demo/compose.yaml` started Redis with `--appendonly yes` and gave it no volume, unlike the canonical stack in `demos/00-quickstart`.
 - **Anthropic cache write rates were a factor of ten low, and unused.** `configs/pricing.yaml` set `cache_write_5m` to 0.625 for Opus where the published rate is 6.25, and the same slip on all four Anthropic models. It went unnoticed because `cost.Calculator` had no field for the rate, so cache writes were billed as ordinary input and the wrong number was never read. Both halves are fixed: the rates are corrected against [the published multipliers](https://platform.claude.com/docs/en/build-with-claude/prompt-caching.md) (a five-minute write is 1.25x input, a one-hour write 2x, a read 0.1x), `cache_write_1h` is added because the API reports the two tiers separately and prices them differently, and the calculator charges each at its own rate.
 
   Pricing validation checked only that a routed model had a price at all, which is why an internally plausible but tenfold-wrong number survived. It now checks the published ratios, deriving its scope from the file so a model added later is covered without anyone remembering. A provider-agnostic companion asserts the orderings that make caching a tradeoff at all: a read costs less than fresh input, a write costs more.
